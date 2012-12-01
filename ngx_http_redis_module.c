@@ -17,6 +17,7 @@ typedef struct {
     ngx_http_upstream_conf_t   upstream;
     ngx_int_t                  index;
     ngx_int_t                  db;
+    ngx_uint_t                 code;
     ngx_uint_t                 gzip_flag;
 } ngx_http_redis_loc_conf_t;
 
@@ -113,6 +114,13 @@ static ngx_command_t  ngx_http_redis_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_redis_loc_conf_t, gzip_flag),
+      NULL },
+
+    { ngx_string("redis_return"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_redis_loc_conf_t, code),
       NULL },
 
       ngx_null_command
@@ -397,6 +405,7 @@ ngx_http_redis_process_header(ngx_http_request_t *r)
 {
     u_char                    *p, *len;
     u_int                      c, try;
+    off_t                      n;
     ngx_str_t                  line;
     ngx_table_elt_t           *h;
     ngx_http_upstream_t       *u;
@@ -505,10 +514,45 @@ found:
         /* set len to pointer */
         len = p;
 
-        /* if defined gzip_flag... */
-        if (rlcf->gzip_flag) {
+        /* try to find end of string */
+        while (*p && *p++ != CR) { /* void */ }
+
+        /* get the length of upcoming redis_key value, convert from ascii */
+        n = ngx_atoof(len, p - len - 1);
+
+        /* if the length is empty, return */
+        if (n == -1) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "redis sent invalid length in response \"%V\" "
+                          "for key \"%V\"",
+                          &line, &ctx->key);
+            return NGX_HTTP_UPSTREAM_INVALID_HEADER;
+        }
+
+        /* check for redirections and gzip_flag... */
+        if (rlcf->code == NGX_HTTP_MOVED_PERMANENTLY
+            || rlcf->code == NGX_HTTP_MOVED_TEMPORARILY
+            || rlcf->code == NGX_HTTP_SEE_OTHER
+            || rlcf->code == NGX_HTTP_TEMPORARY_REDIRECT) {
+
             /* hash init */
-            h = ngx_list_push(&r->upstream->headers_in.headers);
+            h = ngx_list_push(&u->headers_in.headers);
+            if (h == NULL) {
+                return NGX_ERROR;
+            }
+
+            /*
+             * add Location header for redirection
+             */
+            h->hash = 1;
+            ngx_str_set(&h->key, "Location");
+            h->value.len = n;
+            h->value.data = p + 1;
+            u->headers_in.location = h;
+
+        } else if (rlcf->gzip_flag) {
+            /* hash init */
+            h = ngx_list_push(&u->headers_in.headers);
             if (h == NULL) {
                 return NGX_ERROR;
             }
@@ -530,30 +574,16 @@ found:
             u->headers_in.content_encoding = h;
         }
 
-        /* try to find end of string */
-        while (*p && *p++ != CR) { /* void */ }
-
-        /*
-         * get the length of upcoming redis_key value, convert from ascii
-         * if the length is empty, return
-         */
+        /* set length of answer */
 #if defined nginx_version && nginx_version < 1001004
-        r->headers_out.content_length_n = ngx_atoof(len, p - len - 1);
-        if (r->headers_out.content_length_n == -1) {
+        r->headers_out.content_length_n = n;
 #else
-        u->headers_in.content_length_n = ngx_atoof(len, p - len - 1);
-        if (u->headers_in.content_length_n == -1) {
+        u->headers_in.content_length_n = n;
 #endif
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                          "redis sent invalid length in response \"%V\" "
-                          "for key \"%V\"",
-                          &line, &ctx->key);
-            return NGX_HTTP_UPSTREAM_INVALID_HEADER;
-        }
+        /* The length of answer is not empty, set return code */
+        u->headers_in.status_n = rlcf->code;
+        u->state->status = rlcf->code;
 
-        /* The length of answer is not empty, set 200 */
-        u->headers_in.status_n = 200;
-        u->state->status = 200;
         /* Set position to the first symbol of data and return */
         u->buffer.pos = p + 1;
 
@@ -764,6 +794,7 @@ ngx_http_redis_create_loc_conf(ngx_conf_t *cf)
 
     conf->index = NGX_CONF_UNSET;
     conf->db = NGX_CONF_UNSET;
+    conf->code = NGX_CONF_UNSET_UINT;
     conf->gzip_flag = NGX_CONF_UNSET_UINT;
 
     return conf;
@@ -825,6 +856,8 @@ ngx_http_redis_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     if (conf->db == NGX_CONF_UNSET) {
         conf->db = prev->db;
     }
+
+    ngx_conf_merge_uint_value(conf->code, prev->code, NGX_HTTP_OK);
 
     ngx_conf_merge_uint_value(conf->gzip_flag, prev->gzip_flag, 0);
 
