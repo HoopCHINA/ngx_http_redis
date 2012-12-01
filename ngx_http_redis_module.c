@@ -557,6 +557,10 @@ found:
         /* Set position to the first symbol of data and return */
         u->buffer.pos = p + 1;
 
+        /* upstream keepalive */
+#if defined nginx_version && nginx_version >= 1001004
+        u->keepalive = 1;
+#endif
         return NGX_OK;
     }
 
