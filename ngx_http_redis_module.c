@@ -2,6 +2,7 @@
 /*
  * Copyright (C) Igor Sysoev
  * Copyright (C) Sergey A. Osokin
+ * Copyright (C) Wang Wenlin
  */
 
 #define NGX_ESCAPE_REDIS   4
@@ -612,7 +613,11 @@ ngx_http_redis_filter_init(void *data)
 
     u = ctx->request->upstream;
 
+#if defined nginx_version && nginx_version < 1005003
     u->length += NGX_HTTP_REDIS_END;
+#else
+    u->length = u->headers_in.content_length_n + NGX_HTTP_REDIS_END;
+#endif
 
     return NGX_OK;
 }
